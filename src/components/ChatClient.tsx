@@ -129,8 +129,19 @@ export default function ChatClient({ initialScripts }: ChatClientProps) {
   const [scriptConfigs, setScriptConfigs] = useState<Record<string, Record<string, any>>>({});
   const [showSettings, setShowSettings] = useState(false);
   const [currentSchema, setCurrentSchema] = useState<any>(null);
+  
+  // Key History State
+  interface KeyPairHistory {
+      id: string;
+      timestamp: number;
+      sourceName: string;
+      keys: Record<string, string>;
+  }
+  const [keyHistory, setKeyHistory] = useState<KeyPairHistory[]>([]);
+  const [showKeyHistory, setShowKeyHistory] = useState(false);
 
   const [lang, setLang] = useState<'en' | 'zh'>('en');
+
   const t = translations[lang];
 
   // Script Editing State
@@ -232,6 +243,16 @@ export default function ChatClient({ initialScripts }: ChatClientProps) {
       }
     }
     
+    // Load Key History
+    const savedKeys = localStorage.getItem('keyPairHistory');
+    if (savedKeys) {
+        try {
+            setKeyHistory(JSON.parse(savedKeys));
+        } catch (e) {
+            console.error('Failed to load key history:', e);
+        }
+    }
+
     // Load Language Preference
     const savedLang = localStorage.getItem('languagePreference');
     if (savedLang === 'en' || savedLang === 'zh') {
@@ -519,12 +540,64 @@ except:
              };
              setScriptConfigs(updatedConfigs);
              localStorage.setItem('scriptConfigs', JSON.stringify(updatedConfigs));
+             
+             // Check if this action generated keys (contains private key)
+             // We heuristically check for common key field names
+             const hasKey = Object.keys(newValues).some(k => k.includes('private_key') || k.includes('public_key'));
+             if (hasKey) {
+                 const newHistoryItem: KeyPairHistory = {
+                     id: Date.now().toString(),
+                     timestamp: Date.now(),
+                     sourceName: currentScript.name,
+                     keys: newValues
+                 };
+                 const newHistory = [newHistoryItem, ...keyHistory];
+                 setKeyHistory(newHistory);
+                 localStorage.setItem('keyPairHistory', JSON.stringify(newHistory));
+             }
+
              if (!silent) alert("Action completed successfully!");
          }
      } catch (e: any) {
          if (!silent) alert("Action failed: " + e.message);
          else console.error("Action failed:", e);
      }
+  };
+
+  const handleImportKey = (historyItem: KeyPairHistory) => {
+      const currentConfig = scriptConfigs[currentScript.id] || {};
+      const newConfig = { ...currentConfig };
+      const sourceKeys = historyItem.keys;
+      
+      // Smart Mapping Logic
+      // Try to map source keys to target keys based on common patterns
+      // Target keys are defined in currentSchema.params
+      
+      if (currentSchema?.params) {
+          currentSchema.params.forEach((param: any) => {
+              const name = param.name;
+              // Map Public Key
+              if (name === 'public_key' || name === 'my_public_key') {
+                  if (sourceKeys['public_key']) newConfig[name] = sourceKeys['public_key'];
+                  else if (sourceKeys['my_public_key']) newConfig[name] = sourceKeys['my_public_key'];
+              }
+              // Map Private Key
+              if (name === 'private_key' || name === 'my_private_key') {
+                  if (sourceKeys['private_key']) newConfig[name] = sourceKeys['private_key'];
+                  else if (sourceKeys['my_private_key']) newConfig[name] = sourceKeys['my_private_key'];
+              }
+          });
+      }
+      
+      setScriptConfigs({
+          ...scriptConfigs,
+          [currentScript.id]: newConfig
+      });
+      localStorage.setItem('scriptConfigs', JSON.stringify({
+          ...scriptConfigs,
+          [currentScript.id]: newConfig
+      }));
+      setShowKeyHistory(false);
   };
 
   const handleExport = (friendId?: string) => {
@@ -959,9 +1032,18 @@ def decode(text):
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-lg flex flex-col overflow-hidden max-h-[90vh]">
             <div className="p-4 border-b border-gray-200 flex justify-between items-center bg-gray-50">
-                <h3 className="font-bold text-lg">
-                    {currentScript.name} Settings
-                </h3>
+                <div className="flex items-center gap-2">
+                    <h3 className="font-bold text-lg">
+                        {currentScript.name} Settings
+                    </h3>
+                    <button 
+                        onClick={() => setShowKeyHistory(true)}
+                        className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200 transition"
+                        title="Load from saved keys"
+                    >
+                        📂 Import Key Pair
+                    </button>
+                </div>
                 <button onClick={() => setShowSettings(false)} className="text-gray-500 hover:text-gray-700 text-xl">×</button>
             </div>
             
@@ -1031,6 +1113,33 @@ def decode(text):
             </div>
           </div>
         </div>
+      )}
+
+      {/* Key History Modal */}
+      {showKeyHistory && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60]">
+              <div className="bg-white rounded-xl shadow-xl w-full max-w-md flex flex-col overflow-hidden max-h-[80vh]">
+                  <div className="p-4 border-b border-gray-200 flex justify-between items-center bg-gray-50">
+                      <h3 className="font-bold text-lg">Select Key Pair</h3>
+                      <button onClick={() => setShowKeyHistory(false)} className="text-gray-500 hover:text-gray-700 text-xl">×</button>
+                  </div>
+                  <div className="p-4 overflow-y-auto flex-1 space-y-2">
+                      {keyHistory.length === 0 ? (
+                          <p className="text-gray-500 text-center py-4">No saved keys found.<br/>Generate keys in any script to save them here.</p>
+                      ) : (
+                          keyHistory.map(item => (
+                              <div key={item.id} className="border border-gray-200 rounded p-3 hover:bg-gray-50 cursor-pointer" onClick={() => handleImportKey(item)}>
+                                  <div className="font-medium text-gray-800">{item.sourceName}</div>
+                                  <div className="text-xs text-gray-500">{new Date(item.timestamp).toLocaleString()}</div>
+                                  <div className="text-xs text-gray-400 mt-1 truncate font-mono">
+                                      {Object.keys(item.keys).join(', ')}
+                                  </div>
+                              </div>
+                          ))
+                      )}
+                  </div>
+              </div>
+          </div>
       )}
 
       {/* Script Editor Modal */}
