@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { CodeBracketIcon, ClipboardDocumentIcon, LanguageIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, ArrowLeftIcon } from '@heroicons/react/24/outline';
+import { CodeBracketIcon, ClipboardDocumentIcon, LanguageIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, ArrowLeftIcon, Cog6ToothIcon } from '@heroicons/react/24/outline';
 import { ScriptPreset } from '@/lib/scriptLoader';
 
 // Global Pyodide type
@@ -125,7 +125,11 @@ export default function ChatClient({ initialScripts }: ChatClientProps) {
   const [userScripts, setUserScripts] = useState<{[key: string]: ScriptPreset}>({});
   const [lastUsedMap, setLastUsedMap] = useState<Record<string, number>>({});
   
-  // Language State
+  // Script Configuration State
+  const [scriptConfigs, setScriptConfigs] = useState<Record<string, Record<string, any>>>({});
+  const [showSettings, setShowSettings] = useState(false);
+  const [currentSchema, setCurrentSchema] = useState<any>(null);
+
   const [lang, setLang] = useState<'en' | 'zh'>('en');
   const t = translations[lang];
 
@@ -151,7 +155,9 @@ export default function ChatClient({ initialScripts }: ChatClientProps) {
       try {
         if (window.loadPyodide && !pyodide) {
           const py = await window.loadPyodide();
+          await py.loadPackage("pycryptodome");
           setPyodide(py);
+
           setIsPyodideReady(true);
           console.log("Pyodide loaded successfully");
         }
@@ -216,6 +222,16 @@ export default function ChatClient({ initialScripts }: ChatClientProps) {
       }
     }
     
+    // Load Script Configs
+    const savedConfigs = localStorage.getItem('scriptConfigs');
+    if (savedConfigs) {
+      try {
+        setScriptConfigs(JSON.parse(savedConfigs));
+      } catch (e) {
+        console.error('Failed to load script configs:', e);
+      }
+    }
+    
     // Load Language Preference
     const savedLang = localStorage.getItem('languagePreference');
     if (savedLang === 'en' || savedLang === 'zh') {
@@ -267,6 +283,66 @@ export default function ChatClient({ initialScripts }: ChatClientProps) {
     code: ''
   };
 
+  // Helper to load schema
+  const loadSchema = async () => {
+    if (!pyodide || !isPyodideReady || !currentScript.code) {
+        setCurrentSchema(null);
+        return;
+    }
+    
+    try {
+        // We just need to define the function in Python environment first
+        // But running the whole code might be side-effect heavy if not designed well?
+        // Usually safe for these scripts.
+        await pyodide.runPythonAsync(currentScript.code);
+        
+        // Check if get_config_schema exists
+        const hasSchema = pyodide.runPython(" 'get_config_schema' in globals() ");
+        if (hasSchema) {
+            const schemaJson = await pyodide.runPythonAsync("get_config_schema()");
+            // schemaJson is expected to be a JSON string or object
+            // If it returns a python dict, pyodide converts it to a Js Map or Proxy.
+            // Safer to return JSON string from Python.
+            
+            let schema = schemaJson;
+            if (typeof schema === 'string') {
+                schema = JSON.parse(schema);
+            } else if (schema && typeof schema.toJs === 'function') {
+                 schema = schema.toJs();
+            }
+            setCurrentSchema(schema);
+        } else {
+            setCurrentSchema(null);
+        }
+    } catch (e) {
+        console.error("Failed to load schema:", e);
+        setCurrentSchema(null);
+    }
+  };
+
+  useEffect(() => {
+    loadSchema();
+  }, [currentScript.id, isPyodideReady]);
+
+  // Auto-init keys if needed (e.g. for RSA)
+  useEffect(() => {
+    if (!currentSchema || !currentScript.id) return;
+
+    // Check if we should auto-generate keys
+    // Condition: Schema has 'generate_keys' action AND 'public_key' param
+    const hasGenKeysAction = currentSchema.actions?.some((a: any) => a.name === 'generate_keys');
+    const hasPublicKeyParam = currentSchema.params?.some((p: any) => p.name === 'public_key');
+    
+    if (hasGenKeysAction && hasPublicKeyParam) {
+        const config = scriptConfigs[currentScript.id];
+        // If config is missing or public_key is not set
+        if (!config || !config.public_key) {
+            console.log("Auto-generating keys for", currentScript.name);
+            handleAction('generate_keys', true);
+        }
+    }
+  }, [currentSchema, currentScript.id]);
+
   // Helper to run python code
   const runPythonScript = async (code: string, functionName: 'encode' | 'decode', input: string): Promise<string> => {
     if (!pyodide || !isPyodideReady) {
@@ -276,6 +352,25 @@ export default function ChatClient({ initialScripts }: ChatClientProps) {
     try {
       // Load the code
       await pyodide.runPythonAsync(code);
+      
+      // Inject Config
+      const config = scriptConfigs[currentScript.id] || {};
+      // Pass config as a Python dictionary
+      // Pyodide can convert JS objects to Python dicts via globals.set? 
+      // Actually simpler to pass as JSON string and parse in Python or use pyodide.toPy?
+      // Let's set a global SCRIPT_CONFIG variable
+      // We need to make sure values are strings or simple types
+      
+      // Method: JSON serialization is safest to avoid type mismatches
+      const configJson = JSON.stringify(config);
+      pyodide.globals.set("SCRIPT_CONFIG_JSON", configJson);
+      await pyodide.runPythonAsync(`
+import json
+try:
+    SCRIPT_CONFIG = json.loads(SCRIPT_CONFIG_JSON)
+except:
+    SCRIPT_CONFIG = {}
+`);
       
       // Call the function
       // We pass the input as a string variable to avoid syntax issues in f-string or injection
@@ -380,6 +475,48 @@ export default function ChatClient({ initialScripts }: ChatClientProps) {
       };
       updateMessages([...messagesWithUser, errorMessage]);
     }
+  };
+
+  const handleSaveSettings = (newConfig: any) => {
+    const updatedConfigs = {
+        ...scriptConfigs,
+        [currentScript.id]: newConfig
+    };
+    setScriptConfigs(updatedConfigs);
+    localStorage.setItem('scriptConfigs', JSON.stringify(updatedConfigs));
+    setShowSettings(false);
+  };
+
+  const handleAction = async (actionName: string, silent: boolean = false) => {
+     if (!pyodide || !isPyodideReady) return;
+     try {
+         await pyodide.runPythonAsync(currentScript.code);
+         const result = await pyodide.runPythonAsync(`${actionName}()`);
+         // Expecting result to be JSON string or dict with new config values
+         let newValues = result;
+         if (typeof result === 'string') {
+             try {
+                newValues = JSON.parse(result);
+             } catch {}
+         } else if (result && typeof result.toJs === 'function') {
+             newValues = result.toJs();
+         }
+         
+         if (newValues && typeof newValues === 'object') {
+             const currentConfig = scriptConfigs[currentScript.id] || {};
+             const updatedConfig = { ...currentConfig, ...newValues };
+             const updatedConfigs = {
+                 ...scriptConfigs,
+                 [currentScript.id]: updatedConfig
+             };
+             setScriptConfigs(updatedConfigs);
+             localStorage.setItem('scriptConfigs', JSON.stringify(updatedConfigs));
+             if (!silent) alert("Action completed successfully!");
+         }
+     } catch (e: any) {
+         if (!silent) alert("Action failed: " + e.message);
+         else console.error("Action failed:", e);
+     }
   };
 
   const handleExport = (friendId?: string) => {
@@ -695,6 +832,15 @@ def decode(text):
             </div>
           </div>
           <div className="flex gap-2 flex-shrink-0">
+            {currentSchema && (
+                <button 
+                    onClick={() => setShowSettings(true)}
+                    className="text-gray-400 hover:text-blue-500 p-2"
+                    title="Script Settings"
+                >
+                    <Cog6ToothIcon className="w-5 h-5" />
+                </button>
+            )}
             <div className={`px-3 py-1 rounded-full text-xs font-medium flex items-center gap-1 ${
                 isPyodideReady ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
             }`}>
@@ -799,6 +945,83 @@ def decode(text):
           </div>
         </div>
       </div>
+
+      {/* Settings Modal */}
+      {showSettings && currentSchema && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg flex flex-col overflow-hidden max-h-[90vh]">
+            <div className="p-4 border-b border-gray-200 flex justify-between items-center bg-gray-50">
+                <h3 className="font-bold text-lg">
+                    {currentScript.name} Settings
+                </h3>
+                <button onClick={() => setShowSettings(false)} className="text-gray-500 hover:text-gray-700 text-xl">×</button>
+            </div>
+            
+            <div className="p-6 overflow-y-auto flex-1 space-y-4">
+                {currentSchema.params?.map((param: any) => (
+                    <div key={param.name}>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">{param.label}</label>
+                        {param.type === 'textarea' ? (
+                            <textarea 
+                                value={scriptConfigs[currentScript.id]?.[param.name] || ''}
+                                onChange={(e) => {
+                                    const newConfigs = { ...scriptConfigs };
+                                    if (!newConfigs[currentScript.id]) newConfigs[currentScript.id] = {};
+                                    newConfigs[currentScript.id][param.name] = e.target.value;
+                                    setScriptConfigs(newConfigs);
+                                }}
+                                placeholder={param.placeholder}
+                                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm h-24 font-mono"
+                            />
+                        ) : (
+                             <input 
+                                type="text"
+                                value={scriptConfigs[currentScript.id]?.[param.name] || ''}
+                                onChange={(e) => {
+                                    const newConfigs = { ...scriptConfigs };
+                                    if (!newConfigs[currentScript.id]) newConfigs[currentScript.id] = {};
+                                    newConfigs[currentScript.id][param.name] = e.target.value;
+                                    setScriptConfigs(newConfigs);
+                                }}
+                                placeholder={param.placeholder}
+                                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+                             />
+                        )}
+                    </div>
+                ))}
+                
+                {currentSchema.actions?.length > 0 && (
+                    <div className="border-t pt-4 mt-4">
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Actions</label>
+                        <div className="flex gap-2 flex-wrap">
+                            {currentSchema.actions.map((action: any) => (
+                                <button
+                                    key={action.name}
+                                    onClick={() => handleAction(action.name)}
+                                    className="px-3 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded text-sm"
+                                >
+                                    {action.label}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            <div className="p-4 border-t border-gray-200 bg-gray-50 flex justify-end gap-3">
+                <button 
+                    onClick={() => {
+                        localStorage.setItem('scriptConfigs', JSON.stringify(scriptConfigs));
+                        setShowSettings(false);
+                    }}
+                    className="px-4 py-2 bg-blue-600 text-white hover:bg-blue-700 rounded-md"
+                >
+                    Done
+                </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Script Editor Modal */}
       {showEditScript && (
