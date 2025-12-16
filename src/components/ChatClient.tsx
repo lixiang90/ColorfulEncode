@@ -285,12 +285,22 @@ export default function ChatClient({ initialScripts }: ChatClientProps) {
 
   // Helper to load schema
   const loadSchema = async () => {
+    // Reset schema immediately to avoid showing stale settings
+    setCurrentSchema(null);
+
     if (!pyodide || !isPyodideReady || !currentScript.code) {
-        setCurrentSchema(null);
         return;
     }
     
     try {
+        // CLEANUP: Remove definitions from previous scripts to prevent pollution
+        // This is crucial because Pyodide state is persistent across script switches
+        pyodide.runPython(`
+for key in ['get_config_schema', 'encode', 'decode', 'SCRIPT_CONFIG']:
+    if key in globals():
+        del globals()[key]
+`);
+
         // We just need to define the function in Python environment first
         // But running the whole code might be side-effect heavy if not designed well?
         // Usually safe for these scripts.
@@ -311,8 +321,6 @@ export default function ChatClient({ initialScripts }: ChatClientProps) {
                  schema = schema.toJs();
             }
             setCurrentSchema(schema);
-        } else {
-            setCurrentSchema(null);
         }
     } catch (e) {
         console.error("Failed to load schema:", e);
@@ -329,14 +337,14 @@ export default function ChatClient({ initialScripts }: ChatClientProps) {
     if (!currentSchema || !currentScript.id) return;
 
     // Check if we should auto-generate keys
-    // Condition: Schema has 'generate_keys' action AND 'public_key' param
+    // Condition: Schema has 'generate_keys' action AND ('public_key' OR 'my_public_key') param
     const hasGenKeysAction = currentSchema.actions?.some((a: any) => a.name === 'generate_keys');
-    const hasPublicKeyParam = currentSchema.params?.some((p: any) => p.name === 'public_key');
+    const hasPublicKeyParam = currentSchema.params?.some((p: any) => p.name === 'public_key' || p.name === 'my_public_key');
     
     if (hasGenKeysAction && hasPublicKeyParam) {
         const config = scriptConfigs[currentScript.id];
-        // If config is missing or public_key is not set
-        if (!config || !config.public_key) {
+        // If config is missing or public_key/my_public_key is not set
+        if (!config || (!config.public_key && !config.my_public_key)) {
             console.log("Auto-generating keys for", currentScript.name);
             handleAction('generate_keys', true);
         }
@@ -971,7 +979,8 @@ def decode(text):
                                     setScriptConfigs(newConfigs);
                                 }}
                                 placeholder={param.placeholder}
-                                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm h-24 font-mono"
+                                readOnly={param.readOnly}
+                                className={`w-full border border-gray-300 rounded-md px-3 py-2 text-sm h-24 font-mono ${param.readOnly ? 'bg-gray-100 text-gray-500' : ''}`}
                             />
                         ) : (
                              <input 
@@ -984,7 +993,8 @@ def decode(text):
                                     setScriptConfigs(newConfigs);
                                 }}
                                 placeholder={param.placeholder}
-                                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+                                readOnly={param.readOnly}
+                                className={`w-full border border-gray-300 rounded-md px-3 py-2 text-sm ${param.readOnly ? 'bg-gray-100 text-gray-500' : ''}`}
                              />
                         )}
                     </div>
