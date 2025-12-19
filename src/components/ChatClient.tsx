@@ -1036,13 +1036,15 @@ def decode(text):
                     <h3 className="font-bold text-lg">
                         {currentScript.name} Settings
                     </h3>
-                    <button 
-                        onClick={() => setShowKeyHistory(true)}
-                        className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200 transition"
-                        title="Load from saved keys"
-                    >
-                        📂 Import Key Pair
-                    </button>
+                    {currentSchema.params?.some((p: any) => p.name.includes('public_key') || p.name.includes('private_key')) && (
+                        <button 
+                            onClick={() => setShowKeyHistory(true)}
+                            className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200 transition"
+                            title="Load from saved keys"
+                        >
+                            📂 Import Key Pair
+                        </button>
+                    )}
                 </div>
                 <button onClick={() => setShowSettings(false)} className="text-gray-500 hover:text-gray-700 text-xl">×</button>
             </div>
@@ -1066,7 +1068,7 @@ def decode(text):
                             />
                         ) : (
                              <input 
-                                type="text"
+                                type={param.type === 'password' ? 'password' : 'text'}
                                 value={scriptConfigs[currentScript.id]?.[param.name] || ''}
                                 onChange={(e) => {
                                     const newConfigs = { ...scriptConfigs };
