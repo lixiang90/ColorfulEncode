@@ -122,6 +122,11 @@ const translations = {
   }
 };
 
+// Check if text is an image data URL or image path
+function isImageContent(text: string): boolean {
+  return text.startsWith('data:image/') || text.match(/^https?:\/\/.*\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i) !== null;
+}
+
 // Detect if a code string is likely Python
 function detectLanguage(code: string): 'typescript' | 'python' {
   if (
@@ -1102,19 +1107,54 @@ def decode(text):
                       {msg.isEncoded ? t.encoded : t.original}
                     </span>
                   )}
-                  {msg.content}
+                  {isImageContent(msg.content) ? (
+                    <div className="flex flex-col gap-2">
+                      <img
+                        src={msg.content}
+                        alt="Encoded/Decoded image"
+                        className="max-w-full h-auto rounded border border-gray-300 cursor-pointer"
+                        style={{ maxHeight: '400px' }}
+                        onClick={() => window.open(msg.content, '_blank')}
+                      />
+                      <span className="text-xs text-gray-400 block">
+                        {msg.content.length > 80
+                          ? msg.content.substring(0, 80) + '... (点击图片在新标签页中查看完整尺寸)'
+                          : msg.content}
+                      </span>
+                    </div>
+                  ) : (
+                    msg.content
+                  )}
                 </div>
                 <div className="flex justify-between items-center mt-1 gap-4">
                   <span className="text-xs text-gray-400">
                     {msg.type === 'bot' && msg.encoding ? msg.encoding : ''}
                   </span>
-                  <button
-                    onClick={() => navigator.clipboard.writeText(msg.content)}
-                    className="text-gray-400 hover:text-gray-600"
-                    title={t.copy}
-                  >
-                    <ClipboardDocumentIcon className="w-3 h-3" />
-                  </button>
+                  <div className="flex gap-1">
+                    {isImageContent(msg.content) && (
+                      <button
+                        onClick={() => {
+                          const a = document.createElement('a');
+                          a.href = msg.content;
+                          a.download = `stego_image_${Date.now()}.png`;
+                          document.body.appendChild(a);
+                          a.click();
+                          document.body.removeChild(a);
+                        }}
+                        className="text-gray-400 hover:text-blue-600"
+                        title="下载图片"
+                      >
+                        <ArrowDownTrayIcon className="w-3 h-3" />
+                      </button>
+                    )}
+                    <button
+                      onClick={() => navigator.clipboard.writeText(msg.content)}
+                      className="text-gray-400 hover:text-gray-600"
+                      title={t.copy}
+                    >
+                      <ClipboardDocumentIcon className="w-3 h-3" />
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
