@@ -132,9 +132,13 @@ const translations = {
   }
 };
 
-// Check if text is an image data URL or image path
+// Check if text is an image data URL or image path (absolute or relative)
 function isImageContent(text: string): boolean {
-  return text.startsWith('data:image/') || text.match(/^https?:\/\/.*\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i) !== null;
+  if (text.startsWith('data:image/')) return true;
+  if (/^https?:\/\/.*\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i.test(text)) return true;
+  // Relative or root-relative image paths, e.g. "/default_image.jpg" or "default_image.jpg"
+  if (/^\/?[\w\-./%]+\.(jpg|jpeg|png|gif|webp)$/i.test(text)) return true;
+  return false;
 }
 
 // Detect if a code string is likely Python
@@ -226,6 +230,9 @@ export default function ChatClient({ initialScripts }: ChatClientProps) {
 
   const needsPython = currentScript?.language === 'python';
   const isReady = needsPython ? isPyodideReady : isTypeScriptReady;
+
+  // Image steganography scripts get an image upload / decode-from-image UI
+  const isStegoScript = currentScript?.id === 'steganography';
 
   // Load Pyodide lazily (only when a Python script is selected)
   const loadPyodide = useCallback(async () => {
@@ -371,13 +378,36 @@ export default function ChatClient({ initialScripts }: ChatClientProps) {
     localStorage.setItem('userScripts', JSON.stringify(scripts));
   };
 
+  // Persisted placeholder for image messages that are too large for localStorage
+  const IMAGE_HISTORY_PLACEHOLDER = '[图片消息：内容过大，未保存到历史记录]';
+
+  // Save chat history to localStorage, stripping oversized image payloads
+  // (encoded images can be several MB as data URLs and would otherwise throw
+  // QuotaExceededError, breaking the encode/decode flow). Full content stays
+  // available in memory for the current session.
+  const saveChatHistory = (history: { [friendId: string]: ChatMessage[] }) => {
+    try {
+      const slim: { [friendId: string]: ChatMessage[] } = {};
+      Object.keys(history).forEach(friendId => {
+        slim[friendId] = history[friendId].map(msg =>
+          msg.content && msg.content.length > 100000
+            ? { ...msg, content: IMAGE_HISTORY_PLACEHOLDER }
+            : msg
+        );
+      });
+      localStorage.setItem('chatHistory', JSON.stringify(slim));
+    } catch (e) {
+      console.warn('Chat history too large for localStorage, keeping in memory only:', e);
+    }
+  };
+
   const updateMessages = (newMessages: ChatMessage[]) => {
     const newChatHistory = {
       ...chatHistory,
       [selectedFriend]: newMessages
     };
     setChatHistory(newChatHistory);
-    localStorage.setItem('chatHistory', JSON.stringify(newChatHistory));
+    saveChatHistory(newChatHistory);
   };
 
   const messages = chatHistory[selectedFriend] || [];
@@ -612,12 +642,19 @@ for key in ['get_config_schema', 'encode', 'decode', 'SCRIPT_CONFIG']:
   };
 
   const handleDecode = async () => {
-    if (!inputText.trim()) return;
+    const trimmedInput = inputText.trim();
+    // For the steganography script, allow decoding directly from the
+    // uploaded / configured carrier image when the input box is empty:
+    // users "send the encoded image back" by uploading it.
+    const decodeInput = trimmedInput || (isStegoScript
+      ? (uploadedImagePreview || scriptConfigs[currentScript.id]?.image_url || 'default_image.jpg')
+      : '');
+    if (!decodeInput) return;
 
     const userMessage: ChatMessage = {
       id: Date.now().toString(),
       type: 'user',
-      content: inputText,
+      content: decodeInput,
       timestamp: new Date(),
       isEncoded: true
     };
@@ -629,9 +666,9 @@ for key in ['get_config_schema', 'encode', 'decode', 'SCRIPT_CONFIG']:
     try {
       let result: string;
       if (currentScript.language === 'typescript') {
-        result = await runTypeScriptScript(currentScript.code, 'decode', inputText);
+        result = await runTypeScriptScript(currentScript.code, 'decode', decodeInput);
       } else {
-        result = await runPythonScript(currentScript.code, 'decode', inputText);
+        result = await runPythonScript(currentScript.code, 'decode', decodeInput);
       }
       updateLastUsed(currentScript.id);
       const botMessage: ChatMessage = {
@@ -856,8 +893,6 @@ for key in ['get_config_schema', 'encode', 'decode', 'SCRIPT_CONFIG']:
 
   // ============ Image Upload (Client-side only, for steganography) ============
 
-  const isStegoScript = currentScript?.id === 'steganography';
-
   const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -891,7 +926,14 @@ for key in ['get_config_schema', 'encode', 'decode', 'SCRIPT_CONFIG']:
         }
       };
       setScriptConfigs(updatedConfigs);
-      localStorage.setItem('scriptConfigs', JSON.stringify(updatedConfigs));
+      try {
+        localStorage.setItem('scriptConfigs', JSON.stringify(updatedConfigs));
+      } catch (e) {
+        // Image data URL too large for localStorage: keep working with the
+        // in-memory copy for this session instead of crashing.
+        console.warn('Image too large to persist; it will need to be re-uploaded after reload:', e);
+        alert('图片较大无法缓存到本地，本次会话可正常使用，刷新页面后需重新上传 / Image too large to cache; re-upload after reload');
+      }
     };
     reader.readAsDataURL(file);
     event.target.value = '';
@@ -900,16 +942,20 @@ for key in ['get_config_schema', 'encode', 'decode', 'SCRIPT_CONFIG']:
   const handleClearImage = () => {
     setUploadedImagePreview(null);
     setUploadedFileName('');
-    // Reset to default image
+    // Reset to default image (relative path so it works under the app base path)
     const updatedConfigs = {
       ...scriptConfigs,
       [currentScript.id]: {
         ...(scriptConfigs[currentScript.id] || {}),
-        image_url: '/default_image.jpg'
+        image_url: 'default_image.jpg'
       }
     };
     setScriptConfigs(updatedConfigs);
-    localStorage.setItem('scriptConfigs', JSON.stringify(updatedConfigs));
+    try {
+      localStorage.setItem('scriptConfigs', JSON.stringify(updatedConfigs));
+    } catch (e) {
+      console.warn('Failed to persist script configs:', e);
+    }
   };
 
   const clearCurrentChat = () => {

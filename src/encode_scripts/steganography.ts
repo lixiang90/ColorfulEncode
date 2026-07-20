@@ -10,10 +10,12 @@
  * against JPEG compression and common image processing.
  * 
  * Encode: Embed text into an image → returns data URL of modified image
- * Decode: Extract hidden text from a data URL image
+ * Decode: Extract hidden text from a pasted image data URL / link,
+ *         or from the uploaded carrier image when the input box is empty.
  * 
  * Configuration (SCRIPT_CONFIG):
- *   image_url   - Image URL (default: /default_image.jpg)
+ *   image_url   - Image URL (default: default_image.jpg, resolved
+ *                 relative to the app base path)
  *   password    - Optional password for seeded coefficient selection
  *   strength    - Embedding strength 1-10 (default: 5, higher = more robust)
  */
@@ -25,7 +27,7 @@ function get_config_schema() {
                 name: "image_url",
                 label: "载体图片 URL (Carrier Image URL)",
                 type: "text",
-                placeholder: "/default_image.jpg"
+                placeholder: "留空使用默认图片 default_image.jpg"
             },
             {
                 name: "password",
@@ -235,12 +237,42 @@ function hashString(str) {
 // ==================== Main Image Processing ====================
 
 /**
+ * Resolve an image URL so relative paths work when the app is deployed
+ * under a sub-path (e.g. GitHub Pages serves the app at /ColorfulEncode/).
+ * - data:/blob:/http(s) URLs are used as-is
+ * - relative and root-relative paths ("/default_image.jpg" or "default_image.jpg")
+ *   are resolved against the page base URL
+ */
+function resolveImageUrl(url) {
+    if (/^(data:|blob:|https?:)/i.test(url)) {
+        return url;
+    }
+    // Strip leading slashes: "/default_image.jpg" must become
+    // "<basePath>/default_image.jpg", NOT the domain root
+    const rel = url.replace(/^\/+/, '');
+    try {
+        return new URL(rel, document.baseURI).href;
+    } catch (e) {
+        return url;
+    }
+}
+
+/**
  * Load image onto canvas and return { canvas, ctx, imageData }
  */
 function loadImageToCanvas(imageUrl) {
     return new Promise((resolve, reject) => {
+        const resolvedUrl = resolveImageUrl(imageUrl);
         const img = new Image();
-        img.crossOrigin = "anonymous";
+        // Only request CORS for genuinely cross-origin http(s) images.
+        // Same-origin / relative / data: URLs need no CORS headers, and
+        // setting crossOrigin on them can break loading in some setups.
+        try {
+            if (/^https?:/i.test(resolvedUrl) &&
+                new URL(resolvedUrl).origin !== window.location.origin) {
+                img.crossOrigin = "anonymous";
+            }
+        } catch (e) { /* noop: proceed without CORS */ }
         img.onload = () => {
             const canvas = document.createElement('canvas');
             // Resize to even dimensions for 8x8 block processing
@@ -253,8 +285,8 @@ function loadImageToCanvas(imageUrl) {
             const imageData = ctx.getImageData(0, 0, w, h);
             resolve({ canvas, ctx, imageData, width: w, height: h });
         };
-        img.onerror = () => reject(new Error("无法加载图片，请检查URL是否正确"));
-        img.src = imageUrl;
+        img.onerror = () => reject(new Error("无法加载图片，请检查URL是否正确: " + resolvedUrl));
+        img.src = resolvedUrl;
     });
 }
 
@@ -275,21 +307,26 @@ function rgbToLuminance(imageData) {
 }
 
 /**
- * Replace luminance values back into RGBA
+ * Apply the modified luminance back into RGBA while PRESERVING the
+ * original chrominance (color).
+ *
+ * For each pixel we add the luminance delta (newLuma - origLuma) to all
+ * three channels. Since 0.299 + 0.587 + 0.114 = 1, the new luminance
+ * becomes exactly newLuma, while the per-channel differences (i.e. the
+ * color) stay intact. This keeps the encoded image colorful instead of
+ * turning it grayscale.
  */
-function luminanceToRGBA(luma, originalImageData) {
-    const pixels = originalImageData.data;
-    const w = originalImageData.width;
-    const h = originalImageData.height;
+function applyLuminanceDelta(newLuma, origLuma, imageData) {
+    const pixels = imageData.data;
     for (let i = 0; i < pixels.length; i += 4) {
         const idx = i / 4;
-        const y = luma[idx];
-        // Preserve original chrominance, update luminance
-        pixels[i] = Math.max(0, Math.min(255, Math.round(y)));
-        pixels[i + 1] = Math.max(0, Math.min(255, Math.round(y)));
-        pixels[i + 2] = Math.max(0, Math.min(255, Math.round(y)));
+        const d = newLuma[idx] - origLuma[idx];
+        pixels[i]     = Math.max(0, Math.min(255, Math.round(pixels[i]     + d)));
+        pixels[i + 1] = Math.max(0, Math.min(255, Math.round(pixels[i + 1] + d)));
+        pixels[i + 2] = Math.max(0, Math.min(255, Math.round(pixels[i + 2] + d)));
+        // alpha channel is left untouched
     }
-    return originalImageData;
+    return imageData;
 }
 
 // ==================== Main encode/decode functions ====================
@@ -303,8 +340,9 @@ async function encode(text) {
         throw new Error("请输入要隐藏的文字");
     }
 
-    // Read config
-    const imageUrl = SCRIPT_CONFIG.image_url || '/default_image.jpg';
+    // Read config (relative path so it also works when the app is
+    // served under a base path, e.g. GitHub Pages /ColorfulEncode/)
+    const imageUrl = SCRIPT_CONFIG.image_url || 'default_image.jpg';
     const password = SCRIPT_CONFIG.password || '';
     const rawStrength = parseInt(SCRIPT_CONFIG.strength) || 5;
     const strength = Math.max(1, Math.min(10, rawStrength));
@@ -392,8 +430,8 @@ async function encode(text) {
         }
     }
 
-    // Convert back to RGBA image
-    const newImageData = luminanceToRGBA(lumaCopy, imageData);
+    // Convert back to RGBA image (preserving color)
+    const newImageData = applyLuminanceDelta(lumaCopy, luma, imageData);
     ctx.putImageData(newImageData, 0, 0);
 
     // Return as data URL (PNG to preserve the DCT modifications losslessly)
@@ -406,17 +444,28 @@ async function encode(text) {
  * Decode: extract hidden text from an image data URL
  */
 async function decode(text) {
-    if (!text || !text.trim()) {
-        throw new Error("请输入包含隐藏文字的图片数据 (data URL)");
+    // 支持三种解码方式：
+    // 1. 输入框中粘贴图片的 data URL / 图片链接
+    // 2. 输入框留空 → 自动使用通过「上传图片」按钮加载的载体图片
+    // 3. 或设置中填入的 image_url
+    let imageSource = (text || '').trim();
+
+    // If the input itself isn't an image reference (data URL, image link or
+    // image file path), fall back to the uploaded / configured carrier image,
+    // and finally to the default image.
+    const isExplicitImage = /^(data:image\/|blob:|https?:\/\/)/i.test(imageSource) ||
+        /\.(jpe?g|png|gif|webp)(\?.*)?$/i.test(imageSource);
+    if (!isExplicitImage) {
+        const configured = (SCRIPT_CONFIG.image_url || '').trim();
+        imageSource = configured || 'default_image.jpg';
     }
 
-    const imageDataUrl = text.trim();
     const password = SCRIPT_CONFIG.password || '';
     const rawStrength = parseInt(SCRIPT_CONFIG.strength) || 5;
     const strength = Math.max(1, Math.min(10, rawStrength));
 
     // Load the image
-    const { imageData, width, height } = await loadImageToCanvas(imageDataUrl);
+    const { imageData, width, height } = await loadImageToCanvas(imageSource);
 
     // Convert to luminance
     const { luma } = rgbToLuminance(imageData);
