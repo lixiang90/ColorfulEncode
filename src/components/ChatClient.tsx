@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { CodeBracketIcon, ClipboardDocumentIcon, LanguageIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, ArrowLeftIcon, Cog6ToothIcon } from '@heroicons/react/24/outline';
+import { CodeBracketIcon, ClipboardDocumentIcon, LanguageIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, ArrowLeftIcon, Cog6ToothIcon, PhotoIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import { ScriptPreset } from '@/lib/scriptLoader';
 
 // Global Pyodide type
@@ -71,7 +71,12 @@ const translations = {
     importSuccess: 'Import successful!',
     importFailed: 'Import failed: ',
     importNoValidData: 'No valid chat records found for existing bots.',
-    scriptLanguage: 'Script Language'
+    scriptLanguage: 'Script Language',
+    uploadImage: 'Upload Image',
+    uploadImageDesc: 'Select a local image as the carrier for steganography',
+    imageUploaded: 'Image loaded:',
+    clearImage: 'Clear',
+    imageSizeHint: 'Larger images can hide more text'
   },
   zh: {
     title: 'Colorful Encode',
@@ -118,7 +123,12 @@ const translations = {
     importSuccess: '导入成功！',
     importFailed: '导入失败：',
     importNoValidData: '未找到现有 Bot 的有效聊天记录。',
-    scriptLanguage: '脚本语言'
+    scriptLanguage: '脚本语言',
+    uploadImage: '上传图片',
+    uploadImageDesc: '选择本地图片作为隐写载体',
+    imageUploaded: '已加载图片:',
+    clearImage: '清除',
+    imageSizeHint: '更大的图片可以隐藏更多文字'
   }
 };
 
@@ -174,6 +184,10 @@ export default function ChatClient({ initialScripts }: ChatClientProps) {
   }
   const [keyHistory, setKeyHistory] = useState<KeyPairHistory[]>([]);
   const [showKeyHistory, setShowKeyHistory] = useState(false);
+
+  // Image upload state (for steganography)
+  const [uploadedImagePreview, setUploadedImagePreview] = useState<string | null>(null);
+  const [uploadedFileName, setUploadedFileName] = useState<string>('');
 
   const [lang, setLang] = useState<'en' | 'zh'>('en');
 
@@ -303,7 +317,13 @@ export default function ChatClient({ initialScripts }: ChatClientProps) {
     const savedConfigs = localStorage.getItem('scriptConfigs');
     if (savedConfigs) {
       try {
-        setScriptConfigs(JSON.parse(savedConfigs));
+        const parsedConfigs = JSON.parse(savedConfigs);
+        setScriptConfigs(parsedConfigs);
+        // Restore uploaded image preview for steganography script
+        const stegoConfig = parsedConfigs['steganography'];
+        if (stegoConfig?.image_url && stegoConfig.image_url.startsWith('data:image/')) {
+          setUploadedImagePreview(stegoConfig.image_url);
+        }
       } catch (e) {
         console.error('Failed to load script configs:', e);
       }
@@ -515,6 +535,19 @@ for key in ['get_config_schema', 'encode', 'decode', 'SCRIPT_CONFIG']:
   useEffect(() => {
     loadSchema();
   }, [currentScript.id, isPyodideReady]);
+
+  // Restore uploaded image preview when switching to steganography script
+  useEffect(() => {
+    if (currentScript.id === 'steganography') {
+      const stegoConfig = scriptConfigs['steganography'];
+      if (stegoConfig?.image_url && stegoConfig.image_url.startsWith('data:image/')) {
+        setUploadedImagePreview(stegoConfig.image_url);
+      } else {
+        setUploadedImagePreview(null);
+        setUploadedFileName('');
+      }
+    }
+  }, [currentScript.id]);
 
   // Auto-init keys if needed (e.g. for RSA)
   useEffect(() => {
@@ -819,6 +852,64 @@ for key in ['get_config_schema', 'encode', 'decode', 'SCRIPT_CONFIG']:
       event.target.value = '';
     };
     reader.readAsText(file);
+  };
+
+  // ============ Image Upload (Client-side only, for steganography) ============
+
+  const isStegoScript = currentScript?.id === 'steganography';
+
+  const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    // Validate file type
+    if (!file.type.startsWith('image/')) {
+      alert('请选择图片文件 / Please select an image file');
+      event.target.value = '';
+      return;
+    }
+
+    // Validate file size (max 20MB)
+    if (file.size > 20 * 1024 * 1024) {
+      alert('图片太大，请选择小于 20MB 的图片 / Image too large, max 20MB');
+      event.target.value = '';
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target?.result as string;
+      setUploadedImagePreview(dataUrl);
+      setUploadedFileName(file.name);
+
+      // Store in script config so the steganography script can use it
+      const updatedConfigs = {
+        ...scriptConfigs,
+        [currentScript.id]: {
+          ...(scriptConfigs[currentScript.id] || {}),
+          image_url: dataUrl
+        }
+      };
+      setScriptConfigs(updatedConfigs);
+      localStorage.setItem('scriptConfigs', JSON.stringify(updatedConfigs));
+    };
+    reader.readAsDataURL(file);
+    event.target.value = '';
+  };
+
+  const handleClearImage = () => {
+    setUploadedImagePreview(null);
+    setUploadedFileName('');
+    // Reset to default image
+    const updatedConfigs = {
+      ...scriptConfigs,
+      [currentScript.id]: {
+        ...(scriptConfigs[currentScript.id] || {}),
+        image_url: '/default_image.jpg'
+      }
+    };
+    setScriptConfigs(updatedConfigs);
+    localStorage.setItem('scriptConfigs', JSON.stringify(updatedConfigs));
   };
 
   const clearCurrentChat = () => {
@@ -1163,6 +1254,55 @@ def decode(text):
 
         {/* Input Area */}
         <div className="p-4 bg-white border-t border-gray-200">
+          {/* Image upload bar (only visible for steganography script) */}
+          {isStegoScript && (
+            <div className="mb-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                {/* Upload button */}
+                <label className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg cursor-pointer transition text-xs font-medium">
+                  <PhotoIcon className="w-4 h-4" />
+                  {t.uploadImage}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handleImageUpload}
+                    className="hidden"
+                  />
+                </label>
+
+                {/* Uploaded image preview */}
+                {uploadedImagePreview && (
+                  <div className="flex items-center gap-2 bg-blue-50 border border-blue-200 rounded-lg px-2 py-1">
+                    <div className="relative w-8 h-8 rounded overflow-hidden flex-shrink-0">
+                      <img
+                        src={uploadedImagePreview}
+                        alt="Uploaded"
+                        className="w-full h-full object-cover"
+                      />
+                    </div>
+                    <span className="text-xs text-blue-700 truncate max-w-[120px]">
+                      {uploadedFileName || t.imageUploaded}
+                    </span>
+                    <button
+                      onClick={handleClearImage}
+                      className="text-blue-400 hover:text-red-500 transition"
+                      title={t.clearImage}
+                    >
+                      <XMarkIcon className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+
+                {/* Show default image label when no custom image */}
+                {!uploadedImagePreview && (
+                  <span className="text-xs text-gray-400">
+                    📷 {t.imageSizeHint}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="flex gap-2">
             <textarea
               value={inputText}
