@@ -1249,8 +1249,7 @@ def decode(text):
                       <img
                         src={msg.content}
                         alt="Encoded/Decoded image"
-                        className="max-w-full h-auto rounded border border-gray-300 cursor-pointer"
-                        style={{ maxHeight: '400px' }}
+                        className="max-w-full max-h-[400px] w-auto h-auto rounded border border-gray-300 cursor-pointer object-contain"
                         onClick={() => window.open(msg.content, '_blank')}
                       />
                       <span className="text-xs text-gray-400 block">
